@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>3D Vector Field Explorer</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 5px;
+            max-width: 300px;
+            font-family: Arial, sans-serif;
+        }
+        button {
+            margin: 3px;
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+        .slider-container {
+            margin: 10px 0;
+        }
+        .slider-container input {
+            width: 200px;
+            vertical-align: middle;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h2>3D Vector Field Explorer</h2>
+        <p id="fieldType">Current Field: Conservative</p>
+        <div class="slider-container">
+            <label for="stepSlider">Calculation Steps: </label>
+            <input type="range" id="stepSlider" min="100" max="5000" value="1000" step="100">
+            <span id="stepValue">1000</span>
+        </div>
+        <p id="workCalc">Work Calculation:<br>Path 1: 0.00<br>Path 2: 0.00</p>
+        <p id="circulation">Circulation: 0.00</p>
+    </div>
+    <div id="controls">
+        <button id="toggleField">Toggle Field</button>
+        <button id="showPotential">Show Potential</button>
+        <button id="pathDemo">Path Demo</button>
+        <button id="closedLoop">Closed Loop</button>
+        <button id="reset">Reset</button>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script>
+        let scene, camera, renderer, controls;
+        let vectorField, pathGroup, potentialSphere;
+        let fieldType = 'conservative';
+        let animationId = null;
+        let showPotential = false;
+        let stepCount = 1000;
+        
+        const pointA = new THREE.Vector3(-3, -3, -3);
+        const pointB = new THREE.Vector3(3, 3, 3);
+
+        init();
+        animate();
+
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            camera.position.set(10, 10, 10);
+            controls.update();
+
+            // Lighting
+            scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 5, 5);
+            scene.add(directionalLight);
+
+            // Helpers
+            scene.add(new THREE.GridHelper(20, 20));
+            scene.add(new THREE.AxesHelper(10));
+
+            // Create groups
+            vectorField = new THREE.Group();
+            pathGroup = new THREE.Group();
+            potentialSphere = new THREE.Group();
+            scene.add(vectorField);
+            scene.add(pathGroup);
+            scene.add(potentialSphere);
+
+            createVectorField();
+            setupEventListeners();
+            createEndpoints();
+            updatePotentialSphere();
+        }
+
+        function createEndpoints() {
+            const sphereGeometry = new THREE.SphereGeometry(0.3);
+            const material = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+            
+            [pointA, pointB].forEach(point => {
+                const sphere = new THREE.Mesh(sphereGeometry, material);
+                sphere.position.copy(point);
+                pathGroup.add(sphere);
+            });
+        }
+
+        function createVectorField() {
+            vectorField.clear();
+            const spacing = 3;
+            const arrowScale = 0.3;
+
+            for (let x = -6; x <= 6; x += spacing) {
+                for (let y = -6; y <= 6; y += spacing) {
+                    for (let z = -6; z <= 6; z += spacing) {
+                        let vec;
+                        if (fieldType === 'conservative') {
+                            vec = new THREE.Vector3(x, y, z);
+                        } else {
+                            vec = new THREE.Vector3(-y, x, z * 0.5);
+                        }
+                        
+                        const arrow = new THREE.ArrowHelper(
+                            vec.clone().normalize(),
+                            new THREE.Vector3(x, y, z),
+                            vec.length() * arrowScale,
+                            fieldType === 'conservative' ? 0x00ff00 : 0xff0000,
+                            0.2,
+                            0.15
+                        );
+                        vectorField.add(arrow);
+                    }
+                }
+            }
+            document.getElementById('fieldType').textContent = 
+                `Current Field: ${fieldType.charAt(0).toUpperCase() + fieldType.slice(1)}`;
+        }
+
+        function createPathDemo() {
+            resetScene();
+            const straightPath = createPath([pointA, pointB], 0x888888);
+            const curvedPath = createPath(createCurvedPath(), 0x888888);
+            const particles = [
+                createParticle(0xff69b4, pointA),
+                createParticle(0x4169e1, pointA)
+            ];
+
+            const steps = stepCount;
+            let workValues = [0, 0];
+            let currentStep = 0;
+
+            const potentialDiff = fieldType === 'conservative' ? 
+                potentialFunction(pointB) - potentialFunction(pointA) : 
+                null;
+
+            function animate() {
+                if (currentStep < steps) {
+                    const t = currentStep / steps;
+                    const tNext = (currentStep + 1) / steps;
+
+                    const posStraightCurrent = getLinearPosition(t);
+                    const posStraightNext = getLinearPosition(tNext);
+                    const posCurvedCurrent = getCurvedPosition(t);
+                    const posCurvedNext = getCurvedPosition(tNext);
+
+                    workValues[0] += calculateWork(posStraightCurrent, posStraightNext);
+                    workValues[1] += calculateWork(posCurvedCurrent, posCurvedNext);
+
+                    particles[0].position.copy(posStraightNext);
+                    particles[1].position.copy(posCurvedNext);
+
+                    document.getElementById('workCalc').innerHTML = 
+                        `Work Calculation (${steps} steps):<br>
+                        Path 1: ${workValues[0].toFixed(2)}<br>
+                        Path 2: ${workValues[1].toFixed(2)}<br>
+                        ${potentialDiff !== null ? `Δφ: ${potentialDiff.toFixed(2)}` : ''}`;
+
+                    currentStep++;
+                    animationId = requestAnimationFrame(animate);
+                } else {
+                    particles.forEach(p => p.position.copy(pointB));
+                }
+            }
+            animationId = requestAnimationFrame(animate);
+        }
+
+        function createClosedLoop() {
+            resetScene();
+            const radius = 4;
+            const center = new THREE.Vector3();
+            const loopPath = createPath(createLoopPoints(center, radius), 0xffff00);
+            const particle = createParticle(0xffff00, center.clone().add(new THREE.Vector3(radius, 0, 0)));
+
+            let startTime = null;
+            const duration = 5000;
+            let circulation = 0;
+            let previousPosition = particle.position.clone();
+
+            function animate(timestamp) {
+                if (!startTime) startTime = timestamp;
+                const progress = (timestamp - startTime) / duration % 1;
+                const angle = progress * Math.PI * 2;
+                
+                const newPosition = new THREE.Vector3(
+                    center.x + radius * Math.cos(angle),
+                    center.y + radius * Math.sin(angle),
+                    center.z
+                );
+                particle.position.copy(newPosition);
+
+                if (progress > 0) {
+                    const work = calculateWork(previousPosition, newPosition);
+                    circulation += work;
+                    previousPosition.copy(newPosition);
+                }
+
+                document.getElementById('circulation').textContent = 
+                    `Circulation: ${circulation.toFixed(2)}`;
+
+                animationId = requestAnimationFrame(animate);
+            }
+            animationId = requestAnimationFrame(animate);
+        }
+
+        function updatePotentialSphere() {
+            potentialSphere.clear();
+            if (!showPotential || fieldType !== 'conservative') return;
+
+            const geometry = new THREE.SphereGeometry(5, 32, 32);
+            const material = new THREE.MeshPhongMaterial({
+                color: 0x00ffff,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.3
+            });
+            const sphere = new THREE.Mesh(geometry, material);
+            potentialSphere.add(sphere);
+        }
+
+        function calculateWork(start, end) {
+            if (fieldType === 'conservative') {
+                return potentialFunction(end) - potentialFunction(start);
+            }
+            
+            const displacement = end.clone().sub(start);
+            const midpoint = start.clone().add(end).multiplyScalar(0.5);
+            const fieldValue = new THREE.Vector3(-midpoint.y, midpoint.x, midpoint.z * 0.5);
+            return fieldValue.dot(displacement);
+        }
+
+        function potentialFunction(position) {
+            return 0.5 * (position.x**2 + position.y**2 + position.z**2);
+        }
+
+        function createLoopPoints(center, radius) {
+            const points = [];
+            for (let θ = 0; θ <= Math.PI*2; θ += 0.1) {
+                points.push(new THREE.Vector3(
+                    center.x + radius * Math.cos(θ),
+                    center.y + radius * Math.sin(θ),
+                    center.z
+                ));
+            }
+            return points;
+        }
+
+        function createPath(points, color) {
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = new THREE.LineBasicMaterial({ color });
+            pathGroup.add(new THREE.Line(geometry, material));
+            return geometry;
+        }
+
+        function createParticle(color, position) {
+            const geometry = new THREE.SphereGeometry(0.2);
+            const material = new THREE.MeshBasicMaterial({ color });
+            const particle = new THREE.Mesh(geometry, material);
+            particle.position.copy(position);
+            pathGroup.add(particle);
+            return particle;
+        }
+
+        function createCurvedPath() {
+            return Array.from({length: 100}, (_, i) => {
+                const t = i / 99;
+                return getCurvedPosition(t);
+            });
+        }
+
+        function getLinearPosition(t) {
+            return new THREE.Vector3(
+                pointA.x + t * (pointB.x - pointA.x),
+                pointA.y + t * (pointB.y - pointA.y),
+                pointA.z + t * (pointB.z - pointA.z)
+            );
+        }
+
+        function getCurvedPosition(t) {
+            return new THREE.Vector3(
+                pointA.x + t * (pointB.x - pointA.x),
+                pointA.y + (pointB.y - pointA.y) * (t + 0.3 * Math.sin(t * Math.PI)),
+                pointA.z + (pointB.z - pointA.z) * t
+            );
+        }
+
+        function resetScene() {
+            if (animationId) cancelAnimationFrame(animationId);
+            pathGroup.clear();
+            createEndpoints();
+            document.getElementById('workCalc').innerHTML = "Work Calculation:<br>Path 1: 0.00<br>Path 2: 0.00";
+            document.getElementById('circulation').textContent = "Circulation: 0.00";
+        }
+
+        function setupEventListeners() {
+            document.getElementById('toggleField').addEventListener('click', () => {
+                fieldType = fieldType === 'conservative' ? 'non-conservative' : 'conservative';
+                createVectorField();
+                updatePotentialSphere();
+            });
+
+            document.getElementById('showPotential').addEventListener('click', function() {
+                showPotential = !showPotential;
+                this.textContent = showPotential ? 'Hide Potential' : 'Show Potential';
+                updatePotentialSphere();
+            });
+
+            document.getElementById('pathDemo').addEventListener('click', createPathDemo);
+            document.getElementById('closedLoop').addEventListener('click', createClosedLoop);
+            document.getElementById('reset').addEventListener('click', resetScene);
+
+            document.getElementById('stepSlider').addEventListener('input', function() {
+                stepCount = parseInt(this.value);
+                document.getElementById('stepValue').textContent = stepCount;
+            });
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
